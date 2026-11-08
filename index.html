@@ -1,0 +1,35 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Kolwer</title>
+<style>
+/* ВСТАВЬ СЮДА ВСЕ СТИЛИ ИЗ ТВОЕГО ОРИГИНАЛЬНОГО ФАЙЛА */
+</style>
+</head><body>
+<div id="root">Загрузка...</div>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, doc, setDoc, getDoc, onSnapshot, collection, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAGKICEmDSoeXUBjBCWCyJuqdk2GAQEv8c",
+  authDomain: "colwer.firebaseapp.com",
+  projectId: "colwer",
+  storageBucket: "colwer.firebasestorage.app",
+  messagingSenderId: "985156759901",
+  appId: "1:985156759901:web:38bac3f84bae632d9138b4",
+  measurementId: "G-DVC1RCY32E"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+document.getElementById('root').innerText = "Подключение к Firebase...";
+
+onAuthStateChanged(auth, user => {
+  if (user) {
+    document.getElementById('root').innerText = "Успешно! Ваш ID: " + user.uid;
+  } else {
+    signInAnonymously(auth).catch(e => document.getElementById('root').innerText = "Ошибка: " + e.message);
+  }
+});
+</script>
+</body></html>
