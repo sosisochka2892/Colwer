@@ -412,3 +412,535 @@ $("composer").addEventListener("submit", async event => {
 </script>
 </body>
 </html>
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {getFirestore,doc,getDoc,setDoc,collection,query,orderBy,startAt,endAt,limit,onSnapshot,addDoc,serverTimestamp,runTransaction,getDocs,where} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {getAuth,onAuthStateChanged,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,deleteUser} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+const firebaseConfig={
+ apiKey:"AIzaSyAGKICEmDSoeXUBjBCWCyJuqdk2GAQEv8c",
+ authDomain:"colwer.firebaseapp.com",
+ projectId:"colwer",
+ storageBucket:"colwer.firebasestorage.app",
+ messagingSenderId:"985156759901",
+ appId:"1:985156759901:web:38bac3f84bae632d9138b4"
+};
+
+const firebaseApp=initializeApp(firebaseConfig);
+const db=getFirestore(firebaseApp);
+const auth=getAuth(firebaseApp);
+const $=id=>document.getElementById(id);
+
+let currentUser=null;
+let currentChatId=null;
+let unsubMsgs=null;
+let unsubChats=null;
+let searchTimer=null;
+let searchToken=0;
+let activeTab="chats";
+let registrationInProgress=false;
+
+const friendlyError=e=>{
+ const c=e?.code||'';
+ const map={
+  'auth/email-already-in-use':'Эта почта уже зарегистрирована. Войдите в аккаунт.',
+  'auth/invalid-email':'Проверьте адрес электронной почты.',
+  'auth/weak-password':'Пароль должен содержать минимум 6 символов.',
+  'auth/user-not-found':'Аккаунт с такой почтой не найден.',
+  'auth/wrong-password':'Неверная почта или пароль.',
+  'auth/invalid-credential':'Неверная почта или пароль.',
+  'auth/too-many-requests':'Слишком много попыток. Попробуйте позже.',
+  'auth/unauthorized-domain':'Добавьте домен сайта в Firebase Authentication → Settings → Authorized domains.',
+  'permission-denied':'Firestore отклонил запрос. Проверьте правила базы данных.',
+  'auth/network-request-failed':'Проверьте подключение к интернету.',
+  'username-taken':'Этот юзернейм уже занят. Придумайте другой.'
+ };
+ return map[c]||e?.message||'Не удалось выполнить действие. Проверьте настройки Firebase.';
+};
+
+function showError(e){
+ console.error(e);
+ $('gateNotice').textContent=friendlyError(e);
+ $('gateNotice').className='notice error';
+}
+
+function gateMode(mode){
+ const register=mode==='register';
+ $('registerStep').classList.toggle('hidden',!register);
+ $('loginStep').classList.toggle('hidden',register);
+ $('gateTitle').textContent=register?'Создать аккаунт':'Вход в Kolwer';
+ $('gateDescription').textContent=register
+  ?'Регистрация без SMS: укажите номер телефона, почту и придумайте юзернейм.'
+  :'Войдите по электронной почте и паролю.';
+ $('gateNotice').textContent='';
+ $('gateNotice').className='notice';
+}
+
+function showApp(){
+ $('gate').classList.add('hidden');
+ $('app').classList.remove('hidden');
+}
+
+function showGate(){
+ $('app').classList.add('hidden');
+ $('gate').classList.remove('hidden');
+}
+
+onAuthStateChanged(auth,async user=>{
+ currentUser=user;
+
+ if(!user){
+  showGate();
+  gateMode('register');
+  return;
+ }
+
+ try{
+  const p=await getDoc(doc(db,'profiles',user.uid));
+
+  if(p.exists()){
+   showApp();
+   $('myProfile').textContent=(p.data().nick||'Мой профиль')+(p.data().username?' · @'+p.data().username:'');
+   loadChats();
+  }else if(!registrationInProgress){
+   await signOut(auth);
+   showGate();
+   gateMode('register');
+  }
+ }catch(e){
+  showGate();
+  showError(e);
+ }
+});
+
+$('showLogin').onclick=()=>gateMode('login');
+$('showRegister').onclick=()=>gateMode('register');
+
+$('registerBtn').onclick=async()=>{
+ const nick=$('regName').value.trim();
+ const username=$('regUsername').value.trim().replace(/^@/,'').toLowerCase();
+ const phone=$('regPhone').value.trim();
+ const email=$('regEmail').value.trim();
+ const password=$('regPassword').value;
+
+ if(nick.length<2){
+  $('gateNotice').textContent='Имя должно содержать минимум 2 символа.';
+  return;
+ }
+
+ if(!/^[a-z0-9_]{3,20}$/.test(username)){
+  $('gateNotice').textContent='Юзернейм: 3–20 символов, только латинские буквы, цифры и _.';
+  return;
+ }
+
+ if(!/^\+[1-9]\d{7,14}$/.test(phone)){
+  $('gateNotice').textContent='Введите номер в международном формате, например +447700900123.';
+  return;
+ }
+
+ if(!email||password.length<6){
+  $('gateNotice').textContent='Введите корректную почту и пароль минимум из 6 символов.';
+  return;
+ }
+
+ let credential=null;
+
+ try{
+  $('registerBtn').disabled=true;
+  registrationInProgress=true;
+
+  credential=await createUserWithEmailAndPassword(auth,email,password);
+
+  const uid=credential.user.uid;
+  const profileRef=doc(db,'profiles',uid);
+  const usernameRef=doc(db,'usernames',username);
+
+  await runTransaction(db,async tx=>{
+   const existing=await tx.get(usernameRef);
+
+   if(existing.exists()){
+    const err=new Error('username-taken');
+    err.code='username-taken';
+    throw err;
+   }
+
+   tx.set(usernameRef,{
+    uid,
+    username,
+    createdAt:serverTimestamp()
+   });
+
+   tx.set(profileRef,{
+    nick,
+    nickLower:nick.toLocaleLowerCase(),
+    username,
+    usernameLower:username,
+    phone,
+    email,
+    createdAt:serverTimestamp()
+   });
+  });
+
+  $('myProfile').textContent=nick+' · @'+username;
+  showApp();
+  loadChats();
+
+ }catch(e){
+  if(credential?.user){
+   try{
+    await deleteUser(credential.user);
+   }catch(deleteError){
+    console.error(deleteError);
+   }
+  }
+
+  showError(e);
+
+  if(e?.code==='username-taken'){
+   $('gateNotice').textContent='Этот юзернейм уже занят. Придумайте другой.';
+  }
+
+ }finally{
+  registrationInProgress=false;
+  $('registerBtn').disabled=false;
+ }
+};
+
+$('loginBtn').onclick=async()=>{
+ const email=$('loginEmail').value.trim();
+ const password=$('loginPassword').value;
+
+ if(!email||!password){
+  $('gateNotice').textContent='Введите почту и пароль.';
+  return;
+ }
+
+ try{
+  $('loginBtn').disabled=true;
+  await signInWithEmailAndPassword(auth,email,password);
+ }catch(e){
+  showError(e);
+ }finally{
+  $('loginBtn').disabled=false;
+ }
+};
+
+$('logout').onclick=async()=>{
+ if(unsubMsgs){
+  unsubMsgs();
+  unsubMsgs=null;
+ }
+
+ if(unsubChats){
+  unsubChats();
+  unsubChats=null;
+ }
+
+ await signOut(auth);
+};
+
+$('chatsTab').onclick=()=>switchTab('chats');
+$('searchTab').onclick=()=>switchTab('search');
+
+function switchTab(tab){
+ activeTab=tab;
+
+ $('chatsTab').classList.toggle('active',tab==='chats');
+ $('searchTab').classList.toggle('active',tab==='search');
+ $('searchWrap').classList.toggle('hidden',tab!=='search');
+
+ if(tab==='chats'){
+  $('q').value='';
+  loadChats();
+ }else{
+  $('list').innerHTML='<div class="hint">Введите минимум 2 символа имени для поиска.</div>';
+  $('q').focus();
+ }
+}
+
+function loadChats(){
+ if(!currentUser||activeTab!=='chats')return;
+
+ if(unsubChats)unsubChats();
+
+ $('list').innerHTML='<div class="hint">Загружаем чаты…</div>';
+
+ const qChats=query(
+  collection(db,'chats'),
+  where('members','array-contains',currentUser.uid)
+ );
+
+ unsubChats=onSnapshot(qChats,async snap=>{
+  const entries=[];
+
+  for(const d of snap.docs){
+   const data=d.data();
+   const other=(data.members||[]).find(x=>x!==currentUser.uid);
+
+   if(!other)continue;
+
+   let nick='Пользователь';
+
+   try{
+    const prof=await getDoc(doc(db,'profiles',other));
+    if(prof.exists())nick=prof.data().nick||nick;
+   }catch{}
+
+   entries.push({
+    id:d.id,
+    other,
+    nick,
+    last:data.lastMessage||'Нажмите, чтобы открыть чат',
+    time:data.updatedAt?.toDate?data.updatedAt.toDate().getTime():0
+   });
+  }
+
+  entries.sort((a,b)=>b.time-a.time);
+
+  if(activeTab!=='chats')return;
+
+  const list=$('list');
+  list.innerHTML='';
+
+  if(!entries.length){
+   list.innerHTML='<div class="empty"><div>Пока нет переписок.<br><br>Нажмите «Найти», чтобы начать общение.</div></div>';
+   return;
+  }
+
+  for(const item of entries){
+   const b=document.createElement('button');
+   b.className='item';
+
+   const body=document.createElement('div');
+   body.className='item-body';
+
+   const top=document.createElement('div');
+   top.className='item-top';
+
+   const title=document.createElement('div');
+   title.className='title';
+   title.textContent=item.nick;
+
+   top.append(title);
+
+   const bot=document.createElement('div');
+   bot.className='item-bot';
+
+   const preview=document.createElement('div');
+   preview.className='preview';
+   preview.textContent=item.last;
+
+   bot.append(preview);
+   body.append(top,bot);
+   b.append(body);
+
+   b.onclick=()=>openChat(item.other,item.nick);
+   list.append(b);
+  }
+
+ },e=>{
+  $('list').innerHTML='<div class="hint error">'+friendlyError(e)+'</div>';
+ });
+}
+
+$('q').addEventListener('input',()=>{
+ if(activeTab!=='search')return;
+
+ clearTimeout(searchTimer);
+
+ const term=$('q').value.trim().toLocaleLowerCase();
+
+ if(term.length<2){
+  $('list').innerHTML='<div class="hint">Введите минимум 2 символа для поиска.</div>';
+  return;
+ }
+
+ searchTimer=setTimeout(()=>searchUsers(term),350);
+});
+
+async function searchUsers(term){
+ const token=++searchToken;
+
+ $('list').innerHTML='<div class="hint">Ищем...</div>';
+
+ try{
+  const [byName,byUsername]=await Promise.all([
+   getDocs(query(
+    collection(db,'profiles'),
+    orderBy('nickLower'),
+    startAt(term),
+    endAt(term+'\uf8ff'),
+    limit(20)
+   )),
+   getDocs(query(
+    collection(db,'profiles'),
+    orderBy('usernameLower'),
+    startAt(term.replace(/^@/,'')),
+    endAt(term.replace(/^@/,'')+'\uf8ff'),
+    limit(20)
+   ))
+  ]);
+
+  if(token!==searchToken)return;
+
+  const found=new Map();
+
+  for(const snap of [byName,byUsername]){
+   snap.forEach(d=>{
+    if(d.id!==currentUser.uid){
+     found.set(d.id,{id:d.id,...d.data()});
+    }
+   });
+  }
+
+  const list=$('list');
+  list.innerHTML='';
+
+  if(!found.size){
+   list.innerHTML='<div class="hint">Пользователи не найдены.</div>';
+   return;
+  }
+
+  for(const item of found.values()){
+   const name=item.nick||'Пользователь';
+
+   const b=document.createElement('button');
+   b.className='item';
+
+   const body=document.createElement('div');
+   body.className='item-body';
+
+   const top=document.createElement('div');
+   top.className='item-top';
+
+   const title=document.createElement('div');
+   title.className='title';
+   title.textContent=name;
+
+   top.append(title);
+
+   const bot=document.createElement('div');
+   bot.className='item-bot';
+
+   const preview=document.createElement('div');
+   preview.className='preview';
+   preview.textContent='@'+(item.username||'')+' · Начать чат';
+
+   bot.append(preview);
+   body.append(top,bot);
+   b.append(body);
+
+   b.onclick=()=>openChat(item.id,name);
+   list.append(b);
+  }
+
+ }catch(e){
+  $('list').innerHTML='<div class="hint error">'+friendlyError(e)+'</div>';
+ }
+}
+
+async function openChat(uid,name){
+ if(!currentUser)return;
+
+ const members=[currentUser.uid,uid].sort();
+ currentChatId=members.join('_');
+
+ try{
+  const chatRef=doc(db,'chats',currentChatId);
+
+  await runTransaction(db,async tx=>{
+   const snap=await tx.get(chatRef);
+
+   if(!snap.exists()){
+    tx.set(chatRef,{
+     members,
+     createdAt:serverTimestamp()
+    });
+   }
+  });
+
+  $('conv').classList.remove('hidden');
+  $('empty').classList.add('hidden');
+  $('convTitle').textContent=name;
+  $('app').classList.add('in-chat');
+
+  if(unsubMsgs)unsubMsgs();
+
+  const messagesQuery=query(
+   collection(db,'chats',currentChatId,'messages'),
+   orderBy('createdAt','asc'),
+   limit(100)
+  );
+
+  unsubMsgs=onSnapshot(messagesQuery,snap=>{
+   const box=$('msgs');
+   box.innerHTML='';
+
+   snap.forEach(d=>{
+    const msg=d.data();
+
+    const row=document.createElement('div');
+    row.className='row '+(msg.sender===currentUser.uid?'mine':'their');
+
+    const bubble=document.createElement('div');
+    bubble.className='bubble';
+
+    const txt=document.createElement('div');
+    txt.className='txt';
+    txt.textContent=msg.text||'';
+
+    const meta=document.createElement('span');
+    meta.className='meta';
+    meta.textContent=msg.createdAt?.toDate
+     ?msg.createdAt.toDate().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})
+     :'';
+
+    bubble.append(txt,meta);
+    row.append(bubble);
+    box.append(row);
+   });
+
+   box.scrollTop=box.scrollHeight;
+
+  },e=>alert(friendlyError(e)));
+
+ }catch(e){
+  alert(friendlyError(e));
+ }
+}
+
+$('back').onclick=()=>{
+ $('app').classList.remove('in-chat');
+};
+
+$('composer').onsubmit=async e=>{
+ e.preventDefault();
+
+ const text=$('input').value.trim();
+
+ if(!text||!currentChatId||!currentUser)return;
+
+ const send=$('composer').querySelector('button');
+ send.disabled=true;
+
+ try{
+  await addDoc(
+   collection(db,'chats',currentChatId,'messages'),
+   {
+    text,
+    sender:currentUser.uid,
+    createdAt:serverTimestamp()
+   }
+  );
+
+  $('input').value='';
+
+ }catch(err){
+  alert(friendlyError(err));
+ }finally{
+  send.disabled=false;
+ }
+};
+</script>
+</body>
+</html>
